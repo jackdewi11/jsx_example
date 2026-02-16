@@ -1,0 +1,550 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Dodge the Falling Rocks</title>
+  <style>
+    :root { color-scheme: dark; }
+    body{
+      margin:0; min-height:100vh; display:grid; place-items:center;
+      background: #12060a; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      color:#ffecec;
+    }
+    .wrap{
+      width:min(860px, 95vw);
+      display:grid;
+      gap:14px;
+    }
+    header{
+      display:flex; align-items:center; justify-content:space-between;
+      gap:12px; flex-wrap:wrap;
+    }
+    .title{
+      font-weight:800; letter-spacing:0.2px; font-size:18px;
+      display:flex; align-items:center; gap:10px;
+    }
+    .pill{
+      background: rgba(255,77,79,0.06);
+      border: 1px solid rgba(255,77,79,0.14);
+      padding:6px 10px; border-radius:999px;
+      font-size:13px;
+    }
+    .hud{
+      display:flex; gap:10px; flex-wrap:wrap; align-items:center;
+    }
+    button{
+      appearance:none; border:1px solid rgba(255,77,79,0.22);
+      background: linear-gradient(180deg, rgba(255,77,79,0.10), rgba(255,77,79,0.04));
+      color:#ffecec; padding:8px 12px; border-radius:10px;
+      cursor:pointer; font-weight:650;
+    }
+    button:hover{ background: linear-gradient(180deg, rgba(255,77,79,0.14), rgba(255,77,79,0.06)); }
+    button:active{ transform: translateY(1px); }
+    canvas{
+      width:100%;
+      aspect-ratio: 16 / 9;
+      background: radial-gradient(1200px 600px at 60% 0%, rgba(255,77,79,0.16), transparent 60%),
+                  linear-gradient(180deg, rgba(255,120,120,0.02), rgba(255,120,120,0.00));
+      border: 1px solid rgba(255,255,255,0.16);
+      border-radius: 16px;
+      box-shadow: 0 18px 45px rgba(0,0,0,0.45);
+      display:block;
+      touch-action: none; /* allow touch controls */
+    }
+    .help{
+      font-size:13px; opacity:0.85; line-height:1.35;
+      display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;
+    }
+    .kbd{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .muted{ opacity:0.75; }
+    .toast{
+      position: fixed; left: 50%; top: 18px; transform: translateX(-50%);
+      background: rgba(20,8,10,0.7); border:1px solid rgba(255,77,79,0.16);
+      padding:10px 12px; border-radius: 12px; font-size: 13px;
+      backdrop-filter: blur(8px);
+      display:none;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="title">
+        🪨 Dodge the Falling Rocks
+        <span class="pill">Survive • Score increases over time</span>
+      </div>
+      <div class="hud">
+        <span class="pill">Score: <b id="score">0</b></span>
+        <span class="pill">Best: <b id="best">0</b></span>
+        <button id="startBtn">Start</button>
+        <button id="pauseBtn" disabled>Pause</button>
+        <button id="resetBtn">Reset</button>
+      </div>
+    </header>
+
+    <canvas id="game" width="960" height="540" aria-label="Game canvas"></canvas>
+
+    <div class="help">
+      <div>
+        Controls: <span class="kbd">← →</span> or <span class="kbd">A D</span> to move, <span class="kbd">Space</span> to start/pause.
+        <span class="muted">On mobile: drag left/right.</span>
+      </div>
+      <div class="muted">Tip: the longer you survive, the faster rocks fall.</div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    // ====== Simple "Dodge the Falling Rocks" ======
+    // Single-file game: inline JS + CSS. No external assets.
+
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+
+    const scoreEl = document.getElementById("score");
+    const bestEl = document.getElementById("best");
+    const startBtn = document.getElementById("startBtn");
+    const pauseBtn = document.getElementById("pauseBtn");
+    const resetBtn = document.getElementById("resetBtn");
+    const toastEl = document.getElementById("toast");
+
+    // High DPI helper so the canvas stays crisp.
+    function fitCanvasToCSSSize() {
+      const cssW = canvas.clientWidth;
+      const cssH = canvas.clientHeight;
+      const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+      const newW = Math.round(cssW * dpr);
+      const newH = Math.round(cssH * dpr);
+      if (canvas.width !== newW || canvas.height !== newH) {
+        canvas.width = newW;
+        canvas.height = newH;
+      }
+    }
+
+    // Local storage best score
+    const BEST_KEY = "dodge_rocks_best_v1";
+    let best = Number(localStorage.getItem(BEST_KEY) || 0);
+    bestEl.textContent = best;
+
+    // Game state
+    const state = {
+      running: false,
+      paused: false,
+      gameOver: false,
+      time: 0,          // seconds survived
+      score: 0,
+      lastTs: 0,
+      spawnTimer: 0,
+      rocks: [],
+      shake: 0
+    };
+
+    // Player
+    const player = {
+      x: 0,
+      y: 0,
+      w: 44,
+      h: 22,
+      speed: 520, // px/sec (scaled with canvas size each frame)
+      vx: 0
+    };
+
+    // Input
+    const keys = new Set();
+    window.addEventListener("keydown", (e) => {
+      // Prevent page scrolling for arrows/space
+      if (["ArrowLeft","ArrowRight"," ","Spacebar"].includes(e.key)) e.preventDefault();
+      keys.add(e.key);
+
+      if (e.key === " " || e.key === "Spacebar") toggleStartPause();
+    });
+    window.addEventListener("keyup", (e) => keys.delete(e.key));
+
+    // Touch / pointer drag controls
+    let pointerActive = false;
+    let pointerOffsetX = 0;
+    canvas.addEventListener("pointerdown", (e) => {
+      canvas.setPointerCapture(e.pointerId);
+      pointerActive = true;
+      const rect = canvas.getBoundingClientRect();
+      // Convert screen X to canvas X (CSS pixels -> canvas pixels)
+      const cx = (e.clientX - rect.left) * (canvas.width / rect.width);
+      pointerOffsetX = cx - player.x;
+    });
+    canvas.addEventListener("pointermove", (e) => {
+      if (!pointerActive) return;
+      const rect = canvas.getBoundingClientRect();
+      const cx = (e.clientX - rect.left) * (canvas.width / rect.width);
+      player.x = clamp(cx - pointerOffsetX, 0, canvas.width - player.w);
+    });
+    canvas.addEventListener("pointerup", () => pointerActive = false);
+    canvas.addEventListener("pointercancel", () => pointerActive = false);
+
+    startBtn.addEventListener("click", () => {
+      if (!state.running) start();
+      else if (state.gameOver) start();
+    });
+    pauseBtn.addEventListener("click", () => togglePause());
+    resetBtn.addEventListener("click", () => reset(true));
+
+    function toast(msg) {
+      toastEl.textContent = msg;
+      toastEl.style.display = "block";
+      clearTimeout(toastEl._t);
+      toastEl._t = setTimeout(() => (toastEl.style.display = "none"), 1200);
+    }
+
+    function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+    function rand(min, max) { return Math.random() * (max - min) + min; }
+
+    function reset(showToast=false) {
+      fitCanvasToCSSSize();
+      state.running = false;
+      state.paused = false;
+      state.gameOver = false;
+      state.time = 0;
+      state.score = 0;
+      state.lastTs = 0;
+      state.spawnTimer = 0;
+      state.rocks = [];
+      state.shake = 0;
+      scoreEl.textContent = "0";
+      startBtn.textContent = "Start";
+      pauseBtn.textContent = "Pause";
+      pauseBtn.disabled = true;
+
+      // Player starts near bottom center
+      player.w = Math.max(36, canvas.width * 0.045);
+      player.h = Math.max(18, canvas.height * 0.04);
+      player.x = (canvas.width - player.w) / 2;
+      player.y = canvas.height - player.h - canvas.height * 0.06;
+
+      if (showToast) toast("Reset!");
+      draw(); // render idle screen
+    }
+
+    function start() {
+      reset(false);
+      state.running = true;
+      state.paused = false;
+      state.gameOver = false;
+      startBtn.textContent = "Restart";
+      pauseBtn.disabled = false;
+      toast("Go!");
+      requestAnimationFrame(loop);
+    }
+
+    function togglePause() {
+      if (!state.running || state.gameOver) return;
+      state.paused = !state.paused;
+      pauseBtn.textContent = state.paused ? "Resume" : "Pause";
+      toast(state.paused ? "Paused" : "Resumed");
+      if (!state.paused) requestAnimationFrame(loop);
+      draw();
+    }
+
+    function toggleStartPause() {
+      if (!state.running) { start(); return; }
+      if (state.gameOver) { start(); return; }
+      togglePause();
+    }
+
+    function endGame() {
+      state.gameOver = true;
+      state.running = false;
+      pauseBtn.disabled = true;
+      pauseBtn.textContent = "Pause";
+      toast("Game Over");
+      if (state.score > best) {
+        best = state.score;
+        localStorage.setItem(BEST_KEY, String(best));
+        bestEl.textContent = best;
+      }
+      draw();
+    }
+
+    // Rock spawner: rate increases over time
+    function spawnRock(difficulty) {
+      const r = {
+        radius: rand(canvas.width * 0.018, canvas.width * 0.032),
+        x: rand(0, canvas.width),
+        y: -40,
+        vy: rand(140, 210) * (1 + difficulty * 0.12),
+        vx: rand(-35, 35),
+        spin: rand(-3, 3),
+        rot: rand(0, Math.PI * 2),
+      };
+      // Keep inside bounds a bit (using radius)
+      r.x = clamp(r.x, r.radius, canvas.width - r.radius);
+      state.rocks.push(r);
+    }
+
+    function rectCircleCollide(px, py, pw, ph, cx, cy, cr) {
+      // closest point on rect to circle center
+      const closestX = clamp(cx, px, px + pw);
+      const closestY = clamp(cy, py, py + ph);
+      const dx = cx - closestX;
+      const dy = cy - closestY;
+      return (dx*dx + dy*dy) <= cr*cr;
+    }
+
+    function update(dt) {
+      // Difficulty grows slowly with survival time
+      const difficulty = Math.min(12, state.time / 8);
+
+      // Movement
+      const left = keys.has("ArrowLeft") || keys.has("a") || keys.has("A");
+      const right = keys.has("ArrowRight") || keys.has("d") || keys.has("D");
+      let dir = 0;
+      if (left) dir -= 1;
+      if (right) dir += 1;
+
+      // Scale speed with canvas size so it feels similar across screens
+      const speed = (canvas.width / 960) * player.speed;
+      if (!pointerActive) {
+        player.vx = dir * speed;
+        player.x += player.vx * dt;
+        player.x = clamp(player.x, 0, canvas.width - player.w);
+      }
+
+      // Spawn rocks (interval decreases as difficulty increases)
+      const baseInterval = 0.65; // seconds
+      const interval = Math.max(0.18, baseInterval - difficulty * 0.03);
+      state.spawnTimer += dt;
+      while (state.spawnTimer >= interval) {
+        state.spawnTimer -= interval;
+        spawnRock(difficulty);
+        // occasionally spawn an extra rock at higher difficulty
+        if (difficulty > 4 && Math.random() < 0.18) spawnRock(difficulty);
+      }
+
+      // Update rocks
+      for (const rock of state.rocks) {
+        rock.vy += (20 + difficulty * 6) * dt; // slight acceleration
+        rock.x += rock.vx * dt;
+        rock.y += rock.vy * dt;
+        rock.rot += rock.spin * dt;
+
+        // bounce off walls slightly
+        if (rock.x - rock.radius <= 0 || rock.x + rock.radius >= canvas.width) {
+          rock.vx *= -1;
+          rock.x = clamp(rock.x, rock.radius, canvas.width - rock.radius);
+        }
+      }
+
+      // Remove off-screen rocks
+      state.rocks = state.rocks.filter(r => r.y - r.radius < canvas.height + 40);
+
+      // Collision
+      for (const rock of state.rocks) {
+        if (rectCircleCollide(player.x, player.y, player.w, player.h, rock.x, rock.y, rock.radius)) {
+          state.shake = 10;
+          endGame();
+          return;
+        }
+      }
+
+      // Score: based on time survived (and a tiny difficulty bonus)
+      state.time += dt;
+      const newScore = Math.floor(state.time * 10 + difficulty * 2);
+      if (newScore !== state.score) {
+        state.score = newScore;
+        scoreEl.textContent = String(state.score);
+      }
+
+      // Screen shake decay
+      state.shake = Math.max(0, state.shake - 40 * dt);
+    }
+
+    function draw() {
+      fitCanvasToCSSSize();
+
+      // Optional shake
+      const shake = state.shake;
+      const sx = shake ? rand(-shake, shake) : 0;
+      const sy = shake ? rand(-shake, shake) : 0;
+
+      ctx.save();
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.translate(sx, sy);
+
+      // Background stars
+      drawStars();
+
+      // Ground line
+      ctx.globalAlpha = 0.55;
+      ctx.beginPath();
+      ctx.moveTo(0, player.y + player.h + canvas.height*0.02);
+      ctx.lineTo(canvas.width, player.y + player.h + canvas.height*0.02);
+        ctx.strokeStyle = "rgba(255,120,120,0.18)";
+      ctx.lineWidth = Math.max(1, canvas.width * 0.0015);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+
+      // Rocks
+      for (const rock of state.rocks) drawRock(rock);
+
+      // Player
+      drawPlayer();
+
+      // Overlays
+      if (!state.running && !state.gameOver) {
+        overlayCenter("Press Start (or Space)\nDodge the rocks!");
+      }
+      if (state.gameOver) {
+        overlayCenter(`Game Over\nScore: ${state.score}\nPress Restart (or Space)`);
+      }
+      if (state.paused) {
+        overlayCenter("Paused\nPress Space to Resume");
+      }
+
+      // Tiny corner info
+      ctx.globalAlpha = 0.8;
+      ctx.font = `${Math.max(12, canvas.width*0.015)}px system-ui, sans-serif`;
+      ctx.fillStyle = "rgba(255,220,220,0.9)";
+      ctx.fillText("Move: ← →  |  Space: Start/Pause", 14, 26);
+      ctx.globalAlpha = 1;
+
+      ctx.restore();
+    }
+
+    function drawStars() {
+      // deterministic-ish star field based on score/time
+      const count = 70;
+      const t = state.time;
+      ctx.save();
+      ctx.globalAlpha = 0.45;
+      for (let i=0; i<count; i++){
+        const x = (i * 137.5) % canvas.width;
+        const y = (i * 79.3 + (t * 12)) % canvas.height;
+        const r = (i % 3) + 0.6;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI*2);
+          ctx.fillStyle = "rgba(255,150,150,0.7)";
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    function drawRock(rock) {
+      ctx.save();
+      ctx.translate(rock.x, rock.y);
+      ctx.rotate(rock.rot);
+
+      // Rock body
+      ctx.beginPath();
+      // jagged-ish rock using a polygon
+      const pts = 9;
+      for (let i=0; i<pts; i++) {
+        const ang = (i / pts) * Math.PI * 2;
+        const wobble = 0.78 + 0.28 * Math.sin(i*2.1 + rock.rot*0.9);
+        const rr = rock.radius * wobble;
+        const px = Math.cos(ang) * rr;
+        const py = Math.sin(ang) * rr;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+        ctx.fillStyle = "rgba(190,90,80,0.95)";
+      ctx.fill();
+
+      // shading
+      ctx.globalAlpha = 0.25;
+      ctx.beginPath();
+      ctx.arc(-rock.radius*0.25, -rock.radius*0.2, rock.radius*0.7, 0, Math.PI*2);
+      ctx.fillStyle = "rgba(0,0,0,0.45)";
+      ctx.fill();
+      ctx.globalAlpha = 1;
+
+      ctx.restore();
+    }
+
+    function drawPlayer() {
+      ctx.save();
+      ctx.translate(player.x, player.y);
+
+      // body
+      const r = Math.max(8, player.h * 0.55);
+      roundRect(ctx, 0, 0, player.w, player.h, r);
+        ctx.fillStyle = "rgba(255,120,90,0.98)";
+      ctx.fill();
+
+      // windshield / highlight
+      ctx.globalAlpha = 0.6;
+      roundRect(ctx, player.w*0.18, player.h*0.18, player.w*0.46, player.h*0.55, r*0.6);
+      ctx.fillStyle = "rgba(255,255,255,0.75)";
+      ctx.fill();
+      ctx.globalAlpha = 1;
+
+      // wheels
+      const wy = player.h * 0.92;
+      ctx.beginPath();
+      ctx.arc(player.w*0.20, wy, player.h*0.22, 0, Math.PI*2);
+      ctx.arc(player.w*0.80, wy, player.h*0.22, 0, Math.PI*2);
+        ctx.fillStyle = "rgba(30,12,12,0.95)";
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    function overlayCenter(text) {
+      ctx.save();
+      ctx.globalAlpha = 0.92;
+      ctx.fillStyle = "rgba(0,0,0,0.45)";
+      const pad = Math.max(18, canvas.width * 0.025);
+      const w = canvas.width * 0.58;
+      const h = canvas.height * 0.30;
+      const x = (canvas.width - w) / 2;
+      const y = (canvas.height - h) / 2;
+      roundRect(ctx, x, y, w, h, 18);
+      ctx.fill();
+
+      ctx.globalAlpha = 1;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillStyle = "rgba(255,255,255,0.92)";
+      ctx.font = `700 ${Math.max(18, canvas.width*0.032)}px system-ui, sans-serif`;
+
+      const lines = String(text).split("\n");
+      const lineH = Math.max(22, canvas.height * 0.055);
+      const startY = y + h/2 - (lines.length-1)*lineH/2;
+      for (let i=0; i<lines.length; i++){
+        ctx.fillText(lines[i], canvas.width/2, startY + i*lineH);
+      }
+
+      ctx.restore();
+    }
+
+    function roundRect(c, x, y, w, h, r) {
+      const rr = Math.min(r, w/2, h/2);
+      c.beginPath();
+      c.moveTo(x+rr, y);
+      c.arcTo(x+w, y, x+w, y+h, rr);
+      c.arcTo(x+w, y+h, x, y+h, rr);
+      c.arcTo(x, y+h, x, y, rr);
+      c.arcTo(x, y, x+w, y, rr);
+      c.closePath();
+    }
+
+    function loop(ts) {
+      if (!state.running || state.paused) return;
+
+      if (!state.lastTs) state.lastTs = ts;
+      const dt = Math.min(0.033, (ts - state.lastTs) / 1000); // cap dt to avoid giant jumps
+      state.lastTs = ts;
+
+      update(dt);
+      draw();
+
+      if (state.running) requestAnimationFrame(loop);
+    }
+
+    // Keep crisp on resize
+    window.addEventListener("resize", () => { fitCanvasToCSSSize(); draw(); });
+      // Start in idle mode
+    reset(false);
+  </script>
+</body>
+</html>
